@@ -46,6 +46,9 @@ button.secondary{width:100%;background:#fff;color:var(--navy);border:1.5px solid
 button.ghost{background:none;border:none;color:var(--navy);font-size:13px;cursor:pointer;text-decoration:underline;padding:4px 0;}
 #locBtn{position:absolute;right:14px;bottom:14px;width:46px;height:46px;border-radius:50%;background:#fff;border:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,.15);z-index:400;font-size:20px;cursor:pointer;}
 #loadHint{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:rgba(23,58,82,.92);color:#fff;font-size:11px;padding:5px 12px;border-radius:20px;z-index:400;display:none;}
+#layerControl{position:absolute;top:10px;right:10px;background:#fff;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.15);padding:8px 10px;z-index:400;font-size:12px;display:flex;flex-direction:column;gap:6px;}
+#layerControl label{display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;}
+#layerControl input{margin:0;}
 .modalWrap{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:flex-end;justify-content:center;z-index:900;}
 .modalWrap.open{display:flex;}
 .modal{background:var(--card);width:100%;max-width:480px;max-height:92%;overflow:auto;border-radius:16px 16px 0 0;padding:18px 20px 24px;}
@@ -90,6 +93,10 @@ textarea{resize:vertical;min-height:60px;}
   <div id="view-mapa" class="view active">
     <div id="map"></div>
     <div id="loadHint">Cargando parcelario…</div>
+    <div id="layerControl">
+      <label><input type="checkbox" id="toggleParcelario" checked> Parcelario</label>
+      <label><input type="checkbox" id="toggleBarrios"> Barrios</label>
+    </div>
     <button id="locBtn" title="Mi ubicación">◎</button>
     <div id="sheet" class="sheet">
       <button class="closeX" onclick="closeSheet()">✕</button>
@@ -210,8 +217,12 @@ textarea{resize:vertical;min-height:60px;}
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 // ---------- estado ----------
-let map, layerGroup;
-const loadedShards = new Set();
+let map, layerGroup, barriosLayerGroup;
+const shardRecordsCache = {};
+let parcelarioVisible = true;
+let barriosVisible = false;
+let barriosData = null;
+const MIN_ZOOM_PARCELARIO = 16;
 let selectedParcela = null;
 let currentPhotos = [];
 let editingTplId = null;
@@ -247,7 +258,19 @@ function initMap(){
     maxZoom: 19, attribution: '© OpenStreetMap'
   }).addTo(map);
   layerGroup = L.layerGroup().addTo(map);
+  barriosLayerGroup = L.layerGroup().addTo(map);
   map.on('moveend', maybeLoadShards);
+  map.on('zoomend', maybeLoadShards);
+
+  document.getElementById('toggleParcelario').addEventListener('change', e=>{
+    parcelarioVisible = e.target.checked;
+    maybeLoadShards();
+  });
+  document.getElementById('toggleBarrios').addEventListener('change', e=>{
+    barriosVisible = e.target.checked;
+    refreshBarrios();
+  });
+
   maybeLoadShards();
 }
 
@@ -275,25 +298,66 @@ function setOnline(isOnline){
 
 let shardIndex = null;
 async function maybeLoadShards(){
+  const hint = document.getElementById('loadHint');
+
+  if(!parcelarioVisible){
+    layerGroup.clearLayers();
+    hint.style.display = 'none';
+    return;
+  }
+  if(map.getZoom() < MIN_ZOOM_PARCELARIO){
+    layerGroup.clearLayers();
+    hint.textContent = 'Acercá el zoom para ver el catastro (nivel '+MIN_ZOOM_PARCELARIO+'+)';
+    hint.style.display = 'block';
+    return;
+  }
+
   if(!shardIndex){
     shardIndex = await fetchJson('data/index.json');
     if(!shardIndex) return;
   }
+
   const b = map.getBounds();
-  const hint = document.getElementById('loadHint');
-  const toLoad = shardIndex.shards.filter(s=>{
-    if(loadedShards.has(s.file)) return false;
+  const relevant = shardIndex.shards.filter(s=>{
     const [minx,miny,maxx,maxy] = s.bbox;
     return b.getWest() < maxx && b.getEast() > minx && b.getSouth() < maxy && b.getNorth() > miny;
   });
-  if(toLoad.length === 0) return;
-  hint.style.display = 'block';
-  for(const s of toLoad){
-    const recs = await fetchJson('data/shards/'+s.file);
-    loadedShards.add(s.file);
-    if(recs) drawParcels(recs);
+
+  const toFetch = relevant.filter(s=>!shardRecordsCache[s.file]);
+  if(toFetch.length > 0){
+    hint.textContent = 'Cargando parcelario…';
+    hint.style.display = 'block';
+    for(const s of toFetch){
+      const recs = await fetchJson('data/shards/'+s.file);
+      if(recs) shardRecordsCache[s.file] = recs;
+    }
   }
   hint.style.display = 'none';
+
+  layerGroup.clearLayers();
+  relevant.forEach(s=>{
+    const recs = shardRecordsCache[s.file];
+    if(recs) drawParcels(recs);
+  });
+}
+
+async function refreshBarrios(){
+  barriosLayerGroup.clearLayers();
+  if(!barriosVisible) return;
+  if(!barriosData){
+    barriosData = await fetchJson('data/barrios.json');
+    if(!barriosData){
+      alert('Todavía no hay un archivo de barrios cargado en este prototipo (data/barrios.json). Compartilo y lo agrego.');
+      document.getElementById('toggleBarrios').checked = false;
+      barriosVisible = false;
+      return;
+    }
+  }
+  barriosData.forEach(b=>{
+    L.geoJSON(b.geom, {style:{color:'#0f6e56', weight:2, dashArray:'5 5', fillOpacity:0}})
+      .bindTooltip(b.nombre || '', {sticky:true})
+      .addTo(barriosLayerGroup);
+  });
 }
 
 function drawParcels(records){
@@ -337,9 +401,28 @@ function closeSheet(){ document.getElementById('sheet').classList.remove('open')
 document.getElementById('locBtn').onclick = ()=>{
   if(!navigator.geolocation){ alert('Geolocalización no disponible en este navegador.'); return; }
   navigator.geolocation.getCurrentPosition(pos=>{
-    map.setView([pos.coords.latitude, pos.coords.longitude], 17);
-  }, ()=> alert('No se pudo obtener la ubicación. Verificá permisos del navegador.'));
+    map.setView([pos.coords.latitude, pos.coords.longitude], Math.max(map.getZoom(), 17));
+  }, ()=> alert('No se pudo obtener la ubicación. Verificá permisos del navegador.'), {enableHighAccuracy:true});
+  startWatchingPosition();
 };
+
+let watchId = null;
+let posMarker = null;
+let posAccuracyCircle = null;
+function startWatchingPosition(){
+  if(watchId !== null) return; // ya está siguiendo
+  watchId = navigator.geolocation.watchPosition(pos=>{
+    const latlng = [pos.coords.latitude, pos.coords.longitude];
+    if(!posMarker){
+      posMarker = L.circleMarker(latlng, {radius:8, color:'#fff', weight:2, fillColor:'#1a73e8', fillOpacity:1, pane:'markerPane'}).addTo(map);
+      posAccuracyCircle = L.circle(latlng, {radius:pos.coords.accuracy, color:'#1a73e8', weight:1, fillOpacity:0.08, pane:'overlayPane'}).addTo(map);
+    } else {
+      posMarker.setLatLng(latlng);
+      posAccuracyCircle.setLatLng(latlng);
+      posAccuracyCircle.setRadius(pos.coords.accuracy);
+    }
+  }, err=>{ console.warn('watchPosition error', err); }, {enableHighAccuracy:true, maximumAge:2000, timeout:15000});
+}
 
 // ---------- acta ----------
 function openActaForm(){
